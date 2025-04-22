@@ -1,4 +1,4 @@
-from dataset import create_wall_dataloader
+fom dataset import create_wall_dataloader
 from evaluator import ProbingEvaluator
 import torch
 from models import MockModel

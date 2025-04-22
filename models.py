@@ -1,8 +1,7 @@
+import torch
+from torch import nn
 from typing import List
 import numpy as np
-from torch import nn
-from torch.nn import functional as F
-import torch
 
 
 def build_mlp(layers_dims: List[int]):
@@ -15,54 +14,66 @@ def build_mlp(layers_dims: List[int]):
     return nn.Sequential(*layers)
 
 
-class MockModel(torch.nn.Module):
-    """
-    Does nothing. Just for testing.
-    """
-
-    def __init__(self, device="cuda", output_dim=256):
+class SimpleEncoder(nn.Module):
+    def __init__(self, repr_dim=256):
         super().__init__()
-        self.device = device
-        self.repr_dim = output_dim
+        self.conv = nn.Sequential(
+            nn.Conv2d(2, 16, 3, stride=2, padding=1),  # 65 → 33
+            nn.ReLU(),
+            nn.Conv2d(16, 32, 3, stride=2, padding=1),  # 33 → 17
+            nn.ReLU(),
+            nn.Conv2d(32, 64, 3, stride=2, padding=1),  # 17 → 9
+            nn.ReLU(),
+        )
+        self.flatten = nn.Flatten()
+        self.fc = nn.Linear(64 * 9 * 9, repr_dim)  # fixed from 4096 to 5184
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.flatten(x)
+        x = self.fc(x)
+        return x
+
+
+class SimplePredictor(nn.Module):
+    def __init__(self, repr_dim=256, action_dim=2):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(repr_dim + action_dim, 512),
+            nn.ReLU(),
+            nn.Linear(512, repr_dim)
+        )
+
+    def forward(self, state, action):
+        x = torch.cat([state, action], dim=-1)
+        return self.mlp(x)
+
+
+class JEPA(nn.Module):
+    def __init__(self, repr_dim=256):
+        super().__init__()
+        self.encoder = SimpleEncoder(repr_dim)
+        self.target_encoder = SimpleEncoder(repr_dim)
+        self.predictor = SimplePredictor(repr_dim)
+        self.repr_dim = repr_dim
 
     def forward(self, states, actions):
-        """
-        Args:
-            During training:
-                states: [B, T, Ch, H, W]
-            During inference:
-                states: [B, 1, Ch, H, W]
-            actions: [B, T-1, 2]
+        B, T, C, H, W = states.shape
+        device = states.device
+        pred_states = []
 
-        Output:
-            predictions: [B, T, D]
-        """
-        B, T, _ = actions.shape
+        # Encode s0
+        s = self.encoder(states[:, 0])  # [B, D]
+        pred_states.append(s)
 
-        return torch.randn((B, T + 1, self.repr_dim)).to(self.device)
+        for t in range(T - 1):
+            s = self.predictor(s, actions[:, t])  # [B, D]
+            pred_states.append(s)
 
+        return torch.stack(pred_states, dim=1)  # [B, T, D]
 
-class Prober(torch.nn.Module):
-    def __init__(
-        self,
-        embedding: int,
-        arch: str,
-        output_shape: List[int],
-    ):
-        super().__init__()
-        self.output_dim = np.prod(output_shape)
-        self.output_shape = output_shape
-        self.arch = arch
+    def compute_target_embeddings(self, states):
+        B, T, C, H, W = states.shape
+        targets = [self.target_encoder(states[:, t]) for t in range(T)]
+        return torch.stack(targets, dim=1)  # [B, T, D]
 
-        arch_list = list(map(int, arch.split("-"))) if arch != "" else []
-        f = [embedding] + arch_list + [self.output_dim]
-        layers = []
-        for i in range(len(f) - 2):
-            layers.append(torch.nn.Linear(f[i], f[i + 1]))
-            layers.append(torch.nn.ReLU(True))
-        layers.append(torch.nn.Linear(f[-2], f[-1]))
-        self.prober = torch.nn.Sequential(*layers)
-
-    def forward(self, e):
-        output = self.prober(e)
-        return output
